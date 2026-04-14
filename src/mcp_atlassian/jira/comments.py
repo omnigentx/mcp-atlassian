@@ -57,39 +57,23 @@ class CommentsMixin(JiraClient):
         self,
         issue_key: str,
         comment: str,
-        visibility: dict[str, str] | None = None,
-        public: bool | None = None,
     ) -> dict[str, Any]:
         """Add a comment to an issue.
+
+        Always uses standard Jira REST API — comments are visible to all
+        users with ticket access. No visibility restrictions or ServiceDesk
+        internal comment support (removed to prevent agent parameter conflicts).
 
         Args:
             issue_key: The issue key (e.g. 'PROJ-123')
             comment: Comment text to add (in Markdown format)
-            visibility: (optional) Restrict comment visibility
-                (e.g. {"type":"group","value":"jira-users"})
-            public: (optional) For JSM issues only. True for
-                customer-visible, False for internal/agent-only.
-                Uses ServiceDesk API (plain text, not Markdown).
-                Cannot be combined with visibility.
 
         Returns:
             The created comment details
 
         Raises:
-            ValueError: If both public and visibility are set
             Exception: If there is an error adding the comment
         """
-        # ServiceDesk API path for internal/public comments
-        if public is not None:
-            if visibility is not None:
-                raise ValueError(
-                    "Cannot use both 'public' and 'visibility'. "
-                    "'public' uses the ServiceDesk API which "
-                    "does not support Jira visibility "
-                    "restrictions."
-                )
-            return self._add_servicedesk_comment(issue_key, comment, public)
-
         try:
             # Convert Markdown to Jira's markup format
             jira_formatted_comment = self._markdown_to_jira(comment)
@@ -97,12 +81,10 @@ class CommentsMixin(JiraClient):
             # Use v3 API on Cloud for ADF comments
             if isinstance(jira_formatted_comment, dict) and self.config.is_cloud:
                 data: dict[str, Any] = {"body": jira_formatted_comment}
-                if visibility:
-                    data["visibility"] = visibility
                 result = self._post_api3(f"issue/{issue_key}/comment", data)
             else:
                 result = self.jira.issue_add_comment(
-                    issue_key, jira_formatted_comment, visibility
+                    issue_key, jira_formatted_comment
                 )
             if not isinstance(result, dict):
                 msg = f"Unexpected return value type from `jira.issue_add_comment`: {type(result)}"

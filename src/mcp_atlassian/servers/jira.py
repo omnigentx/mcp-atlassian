@@ -57,6 +57,8 @@ def _parse_visibility(
     """
     if visibility is None:
         return None
+    if isinstance(visibility, str) and not visibility.strip():
+        return None
     try:
         parsed = json.loads(visibility)
         if not isinstance(parsed, dict):
@@ -91,6 +93,8 @@ def _parse_additional_fields(
     if isinstance(additional_fields, dict):
         return additional_fields
     if isinstance(additional_fields, str):
+        if not additional_fields.strip():
+            return {}
         try:
             parsed = json.loads(additional_fields)
             if not isinstance(parsed, dict):
@@ -1739,38 +1743,15 @@ async def add_comment(
         ),
     ],
     body: Annotated[str, Field(description="Comment text in Markdown format")],
-    visibility: Annotated[
-        str | None,
-        Field(
-            description=(
-                "(Optional) Comment visibility as JSON string "
-                '(e.g. \'{"type":"group",'
-                '"value":"jira-users"}\')'
-            )
-        ),
-    ] = None,
-    public: Annotated[
-        bool | None,
-        Field(
-            description=(
-                "(Optional) For JSM/Service Desk issues only. "
-                "Set to true for customer-visible comment, "
-                "false for internal agent-only comment. "
-                "Uses the ServiceDesk API (plain text, not "
-                "Markdown). Cannot be combined with visibility."
-            )
-        ),
-    ] = None,
 ) -> str:
     """Add a comment to a Jira issue.
+
+    Comments are always visible to all users with ticket access.
 
     Args:
         ctx: The FastMCP context.
         issue_key: Jira issue key.
         body: Comment text in Markdown.
-        visibility: (Optional) Comment visibility as JSON string.
-        public: (Optional) For JSM issues. True = customer-visible,
-            False = internal/agent-only. Uses ServiceDesk API.
 
     Returns:
         JSON string representing the added comment object.
@@ -1779,8 +1760,7 @@ async def add_comment(
         ValueError: If in read-only mode or Jira client unavailable.
     """
     jira = await get_jira_fetcher(ctx)
-    visibility_dict = _parse_visibility(visibility)
-    result = jira.add_comment(issue_key, body, visibility_dict, public=public)
+    result = jira.add_comment(issue_key, body)
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
@@ -2758,6 +2738,121 @@ async def batch_create_versions(
             )
             results.append({"success": False, "error": str(e), "input": v})
     return json.dumps(results, indent=2, ensure_ascii=False)
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "toolset:jira_projects"},
+    annotations={"title": "Create Project", "destructiveHint": True},
+)
+@check_write_access
+async def create_project(
+    ctx: Context,
+    key: Annotated[
+        str,
+        Field(
+            description=(
+                "Project key: 2-10 uppercase letters, must be unique. "
+                "Examples: 'PROJ', 'MYAPP', 'DEV'"
+            ),
+            pattern=r"^[A-Z][A-Z0-9]{1,9}$",
+        ),
+    ],
+    name: Annotated[str, Field(description="Display name for the project")],
+    project_type_key: Annotated[
+        str,
+        Field(
+            description=(
+                "Type of project. Valid values: "
+                "'software' (Jira Software), "
+                "'business' (Jira Work Management), "
+                "'service_desk' (Jira Service Management)"
+            ),
+        ),
+    ],
+    lead_account_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Account ID of the project lead. "
+                "Use the Jira user search to find account IDs."
+            ),
+        ),
+    ],
+    description: Annotated[
+        str | None,
+        Field(
+            description="Project description in markdown format (optional)",
+            default=None,
+        ),
+    ] = None,
+    project_template_key: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Project template key (optional). Common values:\n"
+                "Software (team-managed):\n"
+                "- Scrum: 'com.pyxis.greenhopper.jira:gh-simplified-agility-scrum' (recommended for agile)\n"
+                "- Kanban: 'com.pyxis.greenhopper.jira:gh-simplified-agility-kanban'\n"
+                "- Basic: 'com.pyxis.greenhopper.jira:gh-simplified-basic'\n"
+                "Software (company-managed):\n"
+                "- Scrum: 'com.pyxis.greenhopper.jira:gh-simplified-scrum-classic'\n"
+                "- Kanban: 'com.pyxis.greenhopper.jira:gh-simplified-kanban-classic'\n"
+                "Service Desk (requires Jira Service Management license):\n"
+                "- IT: 'com.atlassian.servicedesk:simplified-it-service-desk'\n"
+                "- Internal: 'com.atlassian.servicedesk:simplified-internal-service-desk'\n"
+                "- External: 'com.atlassian.servicedesk:simplified-external-service-desk'\n"
+                "If omitted, creates a team-managed (next-gen) project."
+            ),
+            default=None,
+        ),
+    ] = None,
+    assignee_type: Annotated[
+        str,
+        Field(
+            description=(
+                "Default assignee type: 'PROJECT_LEAD' or 'UNASSIGNED' (default)"
+            ),
+            default="UNASSIGNED",
+        ),
+    ] = "UNASSIGNED",
+) -> str:
+    """Create a new Jira project.
+
+    Requires 'Administer Jira' global permission.
+    The project key must be unique across the Jira instance.
+
+    Args:
+        ctx: The FastMCP context.
+        key: Unique project key (uppercase).
+        name: Display name for the project.
+        project_type_key: Type of project.
+        lead_account_id: Account ID of the project lead.
+        description: Optional project description (markdown).
+        project_template_key: Optional project template key.
+        assignee_type: Default assignee type.
+
+    Returns:
+        JSON string of the created project data, or error object on failure.
+    """
+    jira = await get_jira_fetcher(ctx)
+    try:
+        result = jira.create_project(
+            key=key,
+            name=name,
+            project_type_key=project_type_key,
+            lead_account_id=lead_account_id,
+            description=description,
+            project_template_key=project_template_key,
+            assignee_type=assignee_type,
+        )
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(
+            f"Error creating Jira project {key}: {str(e)}", exc_info=True
+        )
+        return json.dumps(
+            {"success": False, "error": str(e)}, indent=2, ensure_ascii=False
+        )
 
 
 @jira_mcp.tool(

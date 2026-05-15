@@ -463,3 +463,91 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             release_date=release_date,
             description=description,
         )
+
+    def create_project(
+        self,
+        key: str,
+        name: str,
+        project_type_key: str,
+        lead_account_id: str,
+        description: str | None = None,
+        project_template_key: str | None = None,
+        assignee_type: str = "UNASSIGNED",
+    ) -> dict[str, Any]:
+        """
+        Create a new Jira project.
+
+        Requires the 'Administer Jira' global permission.
+
+        Args:
+            key: The project key (2-10 uppercase characters, e.g., 'PROJ')
+            name: The name of the project
+            project_type_key: The type of project ('software', 'business', 'service_desk')
+            lead_account_id: The account ID of the project lead
+            description: Optional project description (markdown, converted to ADF for Cloud)
+            project_template_key: Optional template key
+                (e.g., 'com.pyxis.greenhopper.jira:gh-scrum-template')
+            assignee_type: Default assignee type ('PROJECT_LEAD' or 'UNASSIGNED')
+
+        Returns:
+            The created project data as returned by Jira API
+
+        Raises:
+            ValueError: If the API returns an unexpected response
+            Exception: If the API call fails (e.g., permission denied, invalid params)
+        """
+        payload: dict[str, Any] = {
+            "key": key.upper(),
+            "name": name,
+            "projectTypeKey": project_type_key,
+            "leadAccountId": lead_account_id,
+            "assigneeType": assignee_type,
+        }
+
+        if description:
+            # Convert markdown description to appropriate format
+            converted = self._markdown_to_jira(description)
+            payload["description"] = converted
+
+        if project_template_key:
+            payload["projectTemplateKey"] = project_template_key
+
+        logger.info(
+            f"Creating Jira project: key={key.upper()}, name={name}, "
+            f"type={project_type_key}, lead={lead_account_id}"
+        )
+
+        try:
+            response = self.jira.post(
+                "/rest/api/3/project", json=payload, advanced_mode=True
+            )
+            if response.status_code in (200, 201):
+                result = response.json()
+                if not isinstance(result, dict):
+                    error_message = f"Unexpected response from Jira API: {result}"
+                    raise ValueError(error_message)
+                logger.info(f"Successfully created Jira project: {key.upper()}")
+                return result
+            else:
+                # Extract detailed error from Jira response
+                try:
+                    error_data = response.json()
+                    errors = error_data.get("errors", {})
+                    error_messages = error_data.get("errorMessages", [])
+                    details = []
+                    if error_messages:
+                        details.extend(error_messages)
+                    for field, msg in errors.items():
+                        details.append(f"{field}: {msg}")
+                    error_detail = "; ".join(details) if details else response.text
+                except Exception:
+                    error_detail = response.text
+                error_message = (
+                    f"Failed to create project (HTTP {response.status_code}): "
+                    f"{error_detail}"
+                )
+                logger.error(error_message)
+                raise Exception(error_message)
+        except Exception as e:
+            logger.error(f"Error creating Jira project {key}: {e}", exc_info=True)
+            raise

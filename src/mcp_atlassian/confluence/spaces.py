@@ -28,6 +28,55 @@ class SpacesMixin(ConfluenceClient):
         # Cast the return value to the expected type
         return cast(dict[str, object], spaces)
 
+    def create_space(
+        self,
+        space_key: str,
+        space_name: str,
+        description: str = "",
+        is_private: bool = False,
+    ) -> dict:
+        """Create a new Confluence space.
+
+        Wraps ``atlassian-python-api``'s ``create_space`` /
+        ``create_private_space`` helpers. The underlying API requires the
+        caller to have the "Create Space" global permission.
+
+        Args:
+            space_key: Space key (2-10 uppercase letters, must be unique).
+            space_name: Display name for the space.
+            description: Plain-text description (optional).
+            is_private: If True, create a private space visible only to the
+                creator until they explicitly grant access.
+
+        Returns:
+            Raw API response with ``id``, ``key``, ``name``, ``description``.
+        """
+        method = (
+            self.confluence.create_private_space
+            if is_private
+            else self.confluence.create_space
+        )
+        # ``atlassian-python-api`` signatures: create_space(space_key, space_name)
+        # and create_private_space(space_key, space_name). Description is set
+        # via a follow-up call since the underlying methods don't accept it
+        # uniformly across Cloud vs Server/DC.
+        result = method(space_key, space_name)
+        if description and isinstance(result, dict) and result.get("id"):
+            try:
+                self.confluence.update_space(
+                    space_key, space_name, description_plain=description
+                )
+                result["description"] = {"plain": {"value": description}}
+            except Exception as e:
+                # Space was created; description update is best-effort —
+                # log and return the created-space payload so the caller
+                # can decide whether to retry.
+                logger.warning(
+                    "create_space: space %s created but description update "
+                    "failed: %s", space_key, e,
+                )
+        return cast(dict, result)
+
     def get_user_contributed_spaces(self, limit: int = 250) -> dict:
         """
         Get spaces the current user has contributed to.

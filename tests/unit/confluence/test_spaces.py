@@ -165,3 +165,54 @@ class TestSpacesMixin:
 
         # Assert
         assert result == {}
+
+    def test_create_space_calls_public_create(self, spaces_mixin):
+        """``is_private=False`` must call the public ``create_space`` API."""
+        spaces_mixin.confluence.create_space.return_value = {
+            "id": "100",
+            "key": "TEAM",
+            "name": "Team Space",
+        }
+        result = spaces_mixin.create_space("TEAM", "Team Space")
+        spaces_mixin.confluence.create_space.assert_called_once_with(
+            "TEAM", "Team Space"
+        )
+        spaces_mixin.confluence.create_private_space.assert_not_called()
+        assert result["key"] == "TEAM"
+
+    def test_create_space_private_routes_to_private_helper(self, spaces_mixin):
+        """``is_private=True`` must call ``create_private_space`` instead."""
+        spaces_mixin.confluence.create_private_space.return_value = {
+            "id": "101",
+            "key": "SECRET",
+            "name": "Secret Space",
+        }
+        result = spaces_mixin.create_space(
+            "SECRET", "Secret Space", is_private=True
+        )
+        spaces_mixin.confluence.create_private_space.assert_called_once_with(
+            "SECRET", "Secret Space"
+        )
+        spaces_mixin.confluence.create_space.assert_not_called()
+        assert result["key"] == "SECRET"
+
+    def test_create_space_description_is_best_effort(self, spaces_mixin):
+        """Description update follows space creation. If the update fails,
+        the created-space payload is still returned (creation already
+        committed server-side).
+        """
+        spaces_mixin.confluence.create_space.return_value = {
+            "id": "200",
+            "key": "DOC",
+            "name": "Docs",
+        }
+        spaces_mixin.confluence.update_space.side_effect = RuntimeError(
+            "permission denied on update"
+        )
+        result = spaces_mixin.create_space(
+            "DOC", "Docs", description="how-to docs"
+        )
+        # Space create was committed → return that payload, swallow the
+        # update failure (logged with a warning at the call site).
+        assert result["key"] == "DOC"
+        spaces_mixin.confluence.update_space.assert_called_once()

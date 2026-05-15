@@ -109,6 +109,33 @@ def _parse_additional_fields(
 
 @jira_mcp.tool(
     tags={"jira", "read", "toolset:jira_users"},
+    annotations={"title": "Get My Account ID", "readOnlyHint": True},
+)
+async def get_my_account_id(ctx: Context) -> str:
+    """
+    Return the calling user's Jira accountId (Cloud) or username (Server/DC).
+
+    Useful when an agent needs to fill a required ``account_id`` parameter
+    (e.g. ``lead_account_id`` for ``create_project``) but only has its own
+    credentials — no need to chain ``get_user_profile`` first.
+
+    Returns:
+        JSON string with ``{"account_id": "..."}`` on success, or
+        ``{"success": False, "error": "..."}`` on failure.
+    """
+    jira = await get_jira_fetcher(ctx)
+    try:
+        account_id = jira.get_current_user_account_id()
+        return json.dumps({"account_id": account_id}, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error getting current user account id: {e}", exc_info=True)
+        return json.dumps(
+            {"success": False, "error": str(e)}, indent=2, ensure_ascii=False
+        )
+
+
+@jira_mcp.tool(
+    tags={"jira", "read", "toolset:jira_users"},
     annotations={"title": "Get User Profile", "readOnlyHint": True},
 )
 async def get_user_profile(
@@ -2773,8 +2800,11 @@ async def create_project(
         str,
         Field(
             description=(
-                "Account ID of the project lead. "
-                "Use the Jira user search to find account IDs."
+                "Project lead identifier. Accepts: "
+                "(1) literal accountId (24-char hex on Cloud, or username on Server/DC); "
+                "(2) the sentinel 'me' — auto-resolves to the calling user via /rest/api/3/myself; "
+                "(3) email or display name — auto-resolves via user search. "
+                "Agents that don't know the lead's accountId should pass 'me' or an email."
             ),
         ),
     ],
@@ -2836,11 +2866,21 @@ async def create_project(
     """
     jira = await get_jira_fetcher(ctx)
     try:
+        # Resolve lead_account_id. ``_get_account_id`` already short-circuits
+        # when the input is a literal accountId (24-char Cloud or Server/DC
+        # username), so we only need a special case for the 'me' sentinel.
+        # All other inputs (email, display name) flow through the existing
+        # user-lookup chain in users.py.
+        resolved_lead = lead_account_id
+        if lead_account_id.strip().lower() == "me":
+            resolved_lead = jira.get_current_user_account_id()
+        else:
+            resolved_lead = jira._get_account_id(lead_account_id)
         result = jira.create_project(
             key=key,
             name=name,
             project_type_key=project_type_key,
-            lead_account_id=lead_account_id,
+            lead_account_id=resolved_lead,
             description=description,
             project_template_key=project_template_key,
             assignee_type=assignee_type,

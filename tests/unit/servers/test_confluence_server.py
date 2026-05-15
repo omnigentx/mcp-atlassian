@@ -190,6 +190,7 @@ def test_confluence_mcp(mock_confluence_fetcher, mock_base_confluence_config):
         add_comment,
         add_label,
         create_page,
+        create_space,
         delete_attachment,
         delete_page,
         download_attachment,
@@ -234,6 +235,7 @@ def test_confluence_mcp(mock_confluence_fetcher, mock_base_confluence_config):
     confluence_sub_mcp.add_tool(get_labels)
     confluence_sub_mcp.add_tool(add_label)
     confluence_sub_mcp.add_tool(create_page)
+    confluence_sub_mcp.add_tool(create_space)
     confluence_sub_mcp.add_tool(update_page)
     confluence_sub_mcp.add_tool(delete_page)
     confluence_sub_mcp.add_tool(search_user)
@@ -259,6 +261,7 @@ def no_fetcher_test_confluence_mcp(mock_base_confluence_config):
         add_comment,
         add_label,
         create_page,
+        create_space,
         delete_attachment,
         delete_page,
         download_attachment,
@@ -305,6 +308,7 @@ def no_fetcher_test_confluence_mcp(mock_base_confluence_config):
     confluence_sub_mcp.add_tool(get_labels)
     confluence_sub_mcp.add_tool(add_label)
     confluence_sub_mcp.add_tool(create_page)
+    confluence_sub_mcp.add_tool(create_space)
     confluence_sub_mcp.add_tool(update_page)
     confluence_sub_mcp.add_tool(delete_page)
     confluence_sub_mcp.add_tool(search_user)
@@ -963,3 +967,53 @@ async def test_get_page_images_fetch_failure(client, mock_confluence_fetcher):
     summary = json.loads(response.content[0].text)
     assert summary["downloaded"] == 0
     assert len(summary["failed"]) == 1
+
+
+@pytest.mark.anyio
+async def test_create_space_public(client, mock_confluence_fetcher):
+    """``confluence_create_space`` with default ``is_private=False`` delegates
+    to the fetcher and returns the created-space JSON."""
+    mock_confluence_fetcher.create_space.return_value = {
+        "id": "100",
+        "key": "TEAM",
+        "name": "Team Space",
+    }
+    response = await client.call_tool(
+        "confluence_create_space",
+        {"space_key": "TEAM", "space_name": "Team Space"},
+    )
+    result = json.loads(response.content[0].text)
+    assert result["key"] == "TEAM"
+    mock_confluence_fetcher.create_space.assert_called_once_with(
+        space_key="TEAM",
+        space_name="Team Space",
+        description="",
+        is_private=False,
+    )
+
+
+@pytest.mark.anyio
+async def test_create_space_private_with_description(client, mock_confluence_fetcher):
+    """``is_private=True`` + description must propagate to the fetcher."""
+    mock_confluence_fetcher.create_space.return_value = {
+        "id": "101",
+        "key": "SECRET",
+        "name": "Secret Space",
+    }
+    response = await client.call_tool(
+        "confluence_create_space",
+        {
+            "space_key": "SECRET",
+            "space_name": "Secret Space",
+            "description": "Private docs",
+            "is_private": True,
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert result["key"] == "SECRET"
+    mock_confluence_fetcher.create_space.assert_called_once_with(
+        space_key="SECRET",
+        space_name="Secret Space",
+        description="Private docs",
+        is_private=True,
+    )

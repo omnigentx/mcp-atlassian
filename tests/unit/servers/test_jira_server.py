@@ -388,9 +388,11 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
         batch_get_changelogs,
         create_issue,
         create_issue_link,
+        create_project,
         create_sprint,
         delete_issue,
         download_attachments,
+        get_my_account_id,
         edit_comment,
         get_agile_boards,
         get_all_projects,
@@ -441,7 +443,9 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
     jira_sub_mcp.add_tool(get_sprint_issues)
     jira_sub_mcp.add_tool(get_link_types)
     jira_sub_mcp.add_tool(get_user_profile)
+    jira_sub_mcp.add_tool(get_my_account_id)
     jira_sub_mcp.add_tool(create_issue)
+    jira_sub_mcp.add_tool(create_project)
     jira_sub_mcp.add_tool(batch_create_issues)
     jira_sub_mcp.add_tool(batch_get_changelogs)
     jira_sub_mcp.add_tool(update_issue)
@@ -2430,3 +2434,74 @@ async def test_get_field_options_combined(jira_client, mock_jira_fetcher):
     # return_limit=1 caps to first match
     assert len(result) == 1
     assert result[0] == "High"
+
+
+@pytest.mark.anyio
+async def test_get_my_account_id_returns_current_user(jira_client, mock_jira_fetcher):
+    """``jira_get_my_account_id`` exposes the calling user's accountId so
+    agents can fill required ``account_id`` fields (e.g. ``lead_account_id``
+    in ``create_project``) without first having to know it."""
+    mock_jira_fetcher.get_current_user_account_id.return_value = "5b10ac8d82e05b22cc7d4ef5"
+    response = await jira_client.call_tool("jira_get_my_account_id", {})
+    result = json.loads(response.content[0].text)
+    assert result == {"account_id": "5b10ac8d82e05b22cc7d4ef5"}
+
+
+@pytest.mark.anyio
+async def test_create_project_me_sentinel_resolves_to_current_user(
+    jira_client, mock_jira_fetcher
+):
+    """``lead_account_id="me"`` must auto-resolve to the calling user's
+    accountId via ``get_current_user_account_id``. This is the agent-side
+    fix for the production blocker where the LLM didn't know which 24-char
+    accountId to pass."""
+    mock_jira_fetcher.get_current_user_account_id.return_value = "5b10ac8d82e05b22cc7d4ef5"
+    mock_jira_fetcher.create_project.return_value = {
+        "id": "10010",
+        "key": "DEV",
+        "name": "Dev Project",
+    }
+    response = await jira_client.call_tool(
+        "jira_create_project",
+        {
+            "key": "DEV",
+            "name": "Dev Project",
+            "project_type_key": "software",
+            "lead_account_id": "me",
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert result["key"] == "DEV"
+    # ``create_project`` must have been called with the RESOLVED accountId,
+    # not the literal "me".
+    mock_jira_fetcher.create_project.assert_called_once()
+    call_kwargs = mock_jira_fetcher.create_project.call_args.kwargs
+    assert call_kwargs["lead_account_id"] == "5b10ac8d82e05b22cc7d4ef5"
+
+
+@pytest.mark.anyio
+async def test_create_project_email_resolves_via_user_lookup(
+    jira_client, mock_jira_fetcher
+):
+    """Non-accountId identifiers (email, display name) go through
+    ``_get_account_id`` which handles email lookups, username, etc."""
+    mock_jira_fetcher._get_account_id.return_value = "5b10ac8d82e05b22cc7d4ef5"
+    mock_jira_fetcher.create_project.return_value = {
+        "id": "10011",
+        "key": "OPS",
+        "name": "Ops Project",
+    }
+    response = await jira_client.call_tool(
+        "jira_create_project",
+        {
+            "key": "OPS",
+            "name": "Ops Project",
+            "project_type_key": "software",
+            "lead_account_id": "lead@example.com",
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert result["key"] == "OPS"
+    mock_jira_fetcher._get_account_id.assert_called_once_with("lead@example.com")
+    call_kwargs = mock_jira_fetcher.create_project.call_args.kwargs
+    assert call_kwargs["lead_account_id"] == "5b10ac8d82e05b22cc7d4ef5"

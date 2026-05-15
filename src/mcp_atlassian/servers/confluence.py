@@ -516,6 +516,63 @@ async def add_label(
 
 
 @confluence_mcp.tool(
+    tags={"confluence", "write", "toolset:confluence_spaces"},
+    annotations={"title": "Create Space", "destructiveHint": True},
+)
+@check_write_access
+async def create_space(
+    ctx: Context,
+    space_key: Annotated[
+        str,
+        Field(
+            description="Space key: 2-10 uppercase letters/digits, unique across the instance",
+            pattern=r"^[A-Z][A-Z0-9]{1,9}$",
+        ),
+    ],
+    space_name: Annotated[
+        str,
+        Field(description="Display name for the new space"),
+    ],
+    description: Annotated[
+        str,
+        Field(description="Optional plain-text description", default=""),
+    ] = "",
+    is_private: Annotated[
+        bool,
+        Field(
+            description="If true, create a private space visible only to the creator until access is explicitly granted",
+            default=False,
+        ),
+    ] = False,
+) -> str:
+    """Create a new Confluence space.
+
+    Requires the "Create Space" global permission. The space key must be
+    unique across the Confluence instance and match the standard pattern
+    (2-10 uppercase alphanumerics, starting with a letter).
+
+    Returns:
+        JSON string of the created space data, or an error object on failure.
+    """
+    confluence = await get_confluence_fetcher(ctx)
+    try:
+        result = confluence.create_space(
+            space_key=space_key,
+            space_name=space_name,
+            description=description,
+            is_private=is_private,
+        )
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(
+            f"Error creating Confluence space {space_key}: {e}", exc_info=True
+        )
+        return json.dumps(
+            {"success": False, "error": str(e)}, indent=2, ensure_ascii=False
+        )
+
+
+@confluence_mcp.tool(
     tags={"confluence", "write", "toolset:confluence_pages"},
     annotations={"title": "Create Page", "destructiveHint": True},
 )

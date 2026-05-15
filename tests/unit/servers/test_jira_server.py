@@ -2505,3 +2505,42 @@ async def test_create_project_email_resolves_via_user_lookup(
     mock_jira_fetcher._get_account_id.assert_called_once_with("lead@example.com")
     call_kwargs = mock_jira_fetcher.create_project.call_args.kwargs
     assert call_kwargs["lead_account_id"] == "5b10ac8d82e05b22cc7d4ef5"
+
+
+@pytest.mark.anyio
+async def test_create_project_passes_empty_template_through_to_fetcher(
+    jira_client, mock_jira_fetcher
+):
+    """The MCP server tool layer must not invent a template key — that
+    intelligent-default lives in ``ProjectsMixin.create_project`` (so it
+    applies to direct Python callers too, not just MCP). The tool layer
+    only resolves ``lead_account_id`` and forwards every other kwarg
+    verbatim.
+
+    Regression for incident 2026-05-16: agent passed ``project_template_key=""``
+    expecting the server to handle it (description previously said
+    "optional"), got HTTP 400 generic "Invalid request payload".
+    """
+    mock_jira_fetcher.get_current_user_account_id.return_value = "5a0be2a37ae7bd77b1125ca8"
+    mock_jira_fetcher.create_project.return_value = {
+        "id": "10012",
+        "key": "JLP",
+        "name": "Jarvis LP",
+    }
+    response = await jira_client.call_tool(
+        "jira_create_project",
+        {
+            "key": "JLP",
+            "name": "Jarvis LP",
+            "project_type_key": "software",
+            "lead_account_id": "me",
+            "project_template_key": "",  # ← the production-incident shape
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert result["key"] == "JLP"
+    call_kwargs = mock_jira_fetcher.create_project.call_args.kwargs
+    # Empty string forwarded verbatim — the mixin layer fills the default
+    # (tested in tests/unit/jira/test_projects.py).
+    assert call_kwargs["project_template_key"] == ""
+    assert call_kwargs["lead_account_id"] == "5a0be2a37ae7bd77b1125ca8"

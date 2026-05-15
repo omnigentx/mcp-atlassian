@@ -496,6 +496,23 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             ValueError: If the API returns an unexpected response
             Exception: If the API call fails (e.g., permission denied, invalid params)
         """
+        # Jira Cloud REQUIRES ``projectTemplateKey`` on POST /rest/api/3/project
+        # even when it's documented as "optional" by some older clients. When
+        # the caller passes "" or None, the API returns generic
+        # ``HTTP 400: Invalid request payload`` with no structured detail —
+        # which is what blocked production attempts to create project JLP
+        # at 2026-05-16 00:32:59 ICT (4 attempts, all 400). Pick a safe
+        # default per ``project_type_key`` so an unknowing caller still
+        # gets a project, and the agent doesn't have to learn Atlassian's
+        # internal template-key naming scheme.
+        _CLOUD_DEFAULT_TEMPLATE = {
+            "software": "com.pyxis.greenhopper.jira:gh-simplified-agility-scrum",
+            "business": "com.atlassian.jira-core-project-templates:jira-core-simplified-process-control",
+            "service_desk": "com.atlassian.servicedesk:simplified-it-service-desk",
+        }
+        if not project_template_key:
+            project_template_key = _CLOUD_DEFAULT_TEMPLATE.get(project_type_key)
+
         payload: dict[str, Any] = {
             "key": key.upper(),
             "name": name,
@@ -514,7 +531,8 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
 
         logger.info(
             f"Creating Jira project: key={key.upper()}, name={name}, "
-            f"type={project_type_key}, lead={lead_account_id}"
+            f"type={project_type_key}, lead={lead_account_id}, "
+            f"template={project_template_key or '<none>'}"
         )
 
         try:
@@ -529,7 +547,12 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
                 logger.info(f"Successfully created Jira project: {key.upper()}")
                 return result
             else:
-                # Extract detailed error from Jira response
+                # Extract detailed error from Jira response. When Jira returns
+                # a bare ``Invalid request payload`` with no structured detail
+                # (common on Cloud for malformed bodies), surface the FULL
+                # request body and raw response in the error message — that's
+                # the only way to diagnose missing/wrong fields like the
+                # 2026-05-16 JLP incident.
                 try:
                     error_data = response.json()
                     errors = error_data.get("errors", {})
@@ -542,11 +565,23 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
                     error_detail = "; ".join(details) if details else response.text
                 except Exception:
                     error_detail = response.text
+                # Make payload visible in logs + error so callers can diagnose
+                # without re-running and dumping over the wire. ``json.dumps``
+                # uses default spacing matching the Jira request.
+                import json as _json
+                payload_repr = _json.dumps(payload, ensure_ascii=False)[:1500]
+                raw_response = (response.text or "")[:500]
+                logger.error(
+                    "Failed to create project key=%s (HTTP %d). "
+                    "detail=%r payload=%s raw_response=%r",
+                    key.upper(), response.status_code, error_detail,
+                    payload_repr, raw_response,
+                )
                 error_message = (
                     f"Failed to create project (HTTP {response.status_code}): "
-                    f"{error_detail}"
+                    f"{error_detail}. Sent payload: {payload_repr}. "
+                    f"Raw response: {raw_response}"
                 )
-                logger.error(error_message)
                 raise Exception(error_message)
         except Exception as e:
             logger.error(f"Error creating Jira project {key}: {e}", exc_info=True)

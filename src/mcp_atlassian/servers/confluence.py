@@ -551,6 +551,13 @@ async def create_space(
     unique across the Confluence instance and match the standard pattern
     (2-10 uppercase alphanumerics, starting with a letter).
 
+    **Call this BEFORE ``confluence_create_page`` when targeting a new
+    space key.** Confluence returns ``403 permission denied`` (not 404)
+    for pages in non-existent spaces, which is misleading — production
+    incident 2026-05-16 had an agent assume the space existed and
+    repeatedly hit 403s before discovering the space had never been
+    created.
+
     Returns:
         JSON string of the created space data, or an error object on failure.
     """
@@ -664,18 +671,39 @@ async def create_page(
         is_markdown = False
         content_representation = content_format  # Pass 'wiki' or 'storage' directly
 
-    page = confluence_fetcher.create_page(
-        space_key=space_key,
-        title=title,
-        body=content,
-        parent_id=parent_id,
-        is_markdown=is_markdown,
-        enable_heading_anchors=enable_heading_anchors
-        if content_format == "markdown"
-        else False,
-        content_representation=content_representation,
-        emoji=emoji,
-    )
+    try:
+        page = confluence_fetcher.create_page(
+            space_key=space_key,
+            title=title,
+            body=content,
+            parent_id=parent_id,
+            is_markdown=is_markdown,
+            enable_heading_anchors=enable_heading_anchors
+            if content_format == "markdown"
+            else False,
+            content_representation=content_representation,
+            emoji=emoji,
+        )
+    except Exception as e:
+        # Confluence returns ``403 permission denied`` for pages in
+        # non-existent spaces (instead of 404). When the error text
+        # matches that pattern, hint the caller to create the space
+        # first via ``confluence_create_space`` — incident 2026-05-16
+        # had an agent burn time retrying 403s on space JLP which had
+        # never been created.
+        err_text = str(e)
+        permission_markers = (
+            "permission to view the content",
+            "no permission",
+            "permission denied",
+        )
+        if any(m in err_text.lower() for m in permission_markers):
+            raise type(e)(
+                f"{err_text}. If space '{space_key}' does not exist yet, "
+                f"call ``confluence_create_space(space_key='{space_key}', ...)`` "
+                f"first. Confluence returns 403 (not 404) for pages in missing spaces."
+            ) from e
+        raise
     result = page.to_simplified_dict()
     if not include_content:
         result.pop("content", None)

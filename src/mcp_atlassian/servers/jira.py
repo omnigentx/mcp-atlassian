@@ -2819,19 +2819,21 @@ async def create_project(
         str | None,
         Field(
             description=(
-                "Project template key (optional). Common values:\n"
+                "Project template key. Jira Cloud REQUIRES this for project creation; "
+                "if omitted or empty, the server picks a sane default for ``project_type_key`` "
+                "('software' → Scrum agility, 'business' → process control, 'service_desk' → IT). "
+                "Pass explicitly to override the default. Common values:\n"
                 "Software (team-managed):\n"
-                "- Scrum: 'com.pyxis.greenhopper.jira:gh-simplified-agility-scrum' (recommended for agile)\n"
+                "- Scrum: 'com.pyxis.greenhopper.jira:gh-simplified-agility-scrum' (DEFAULT for 'software')\n"
                 "- Kanban: 'com.pyxis.greenhopper.jira:gh-simplified-agility-kanban'\n"
                 "- Basic: 'com.pyxis.greenhopper.jira:gh-simplified-basic'\n"
                 "Software (company-managed):\n"
                 "- Scrum: 'com.pyxis.greenhopper.jira:gh-simplified-scrum-classic'\n"
                 "- Kanban: 'com.pyxis.greenhopper.jira:gh-simplified-kanban-classic'\n"
                 "Service Desk (requires Jira Service Management license):\n"
-                "- IT: 'com.atlassian.servicedesk:simplified-it-service-desk'\n"
+                "- IT: 'com.atlassian.servicedesk:simplified-it-service-desk' (DEFAULT for 'service_desk')\n"
                 "- Internal: 'com.atlassian.servicedesk:simplified-internal-service-desk'\n"
-                "- External: 'com.atlassian.servicedesk:simplified-external-service-desk'\n"
-                "If omitted, creates a team-managed (next-gen) project."
+                "- External: 'com.atlassian.servicedesk:simplified-external-service-desk'"
             ),
             default=None,
         ),

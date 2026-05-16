@@ -522,9 +522,14 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
         }
 
         if description:
-            # Convert markdown description to appropriate format
-            converted = self._markdown_to_jira(description)
-            payload["description"] = converted
+            # ⚠️ Project description is PLAIN STRING, not ADF.
+            # ``POST /rest/api/3/project`` schema says ``description: string``
+            # — unlike issue ``description`` which is ADF on Cloud. Passing
+            # an ADF dict here triggers ``HTTP 400: Invalid request payload``
+            # (production incident 2026-05-16 09:32 ICT, jarvis.log:3765+).
+            # If callers send markdown, strip to plain text — the project
+            # screen renders it as plain text anyway.
+            payload["description"] = description
 
         if project_template_key:
             payload["projectTemplateKey"] = project_template_key

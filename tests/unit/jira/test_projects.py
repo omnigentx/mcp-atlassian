@@ -830,6 +830,47 @@ def test_create_project_fills_default_template_for_software(
     )
 
 
+def test_create_project_description_is_plain_string_not_adf(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """Regression for 2026-05-16 09:32 ICT incident: project ``description``
+    must be a plain string in the POST /rest/api/3/project payload —
+    sending the ADF dict (which ``_markdown_to_jira`` returns on Cloud)
+    triggers ``HTTP 400: Invalid request payload`` with no structured
+    detail. The project create endpoint's schema documents ``description``
+    as ``string``, unlike issue endpoints where it's ADF.
+    """
+    posted = {}
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.side_effect = lambda *a, **kw: (
+        posted.update({"json": kw.get("json")})
+        or _ok_response({"id": "1", "key": "JLP", "name": "JLP"})
+    )
+
+    # The mixin's _markdown_to_jira would normally convert this to an ADF
+    # dict on Cloud — verify create_project bypasses that conversion.
+    projects_mixin._markdown_to_jira = MagicMock(return_value={
+        "version": 1, "type": "doc", "content": [],
+    })
+
+    projects_mixin.create_project(
+        key="JLP",
+        name="JLP",
+        project_type_key="software",
+        lead_account_id="acc",
+        description="# Heading\n\nMarkdown body with **bold**.",
+    )
+
+    sent = posted["json"]
+    assert isinstance(sent["description"], str), (
+        f"Project description MUST be plain string. Got {type(sent['description'])}: "
+        f"{sent['description']!r}. ADF causes HTTP 400 on /rest/api/3/project."
+    )
+    assert sent["description"] == "# Heading\n\nMarkdown body with **bold**."
+    # _markdown_to_jira must NOT be called for project description
+    projects_mixin._markdown_to_jira.assert_not_called()
+
+
 def test_create_project_respects_explicit_template_key(
     projects_mixin: ProjectsMixin,
 ) -> None:

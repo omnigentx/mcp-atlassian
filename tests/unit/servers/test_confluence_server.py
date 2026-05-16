@@ -993,6 +993,64 @@ async def test_create_space_public(client, mock_confluence_fetcher):
 
 
 @pytest.mark.anyio
+async def test_create_page_permission_error_hints_create_space(
+    client, mock_confluence_fetcher
+):
+    """Regression for incident 2026-05-16: Confluence returns
+    ``403 permission denied`` (not 404) when a page is requested in a
+    non-existent space. The agent assumed the space existed and burned
+    several retries. The tool MUST surface a hint pointing at
+    ``confluence_create_space`` so the next agent recovers fast.
+    """
+    from fastmcp.exceptions import ToolError
+
+    mock_confluence_fetcher.create_page.side_effect = Exception(
+        "The calling user does not have permission to view the content"
+    )
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool(
+            "confluence_create_page",
+            {
+                "space_key": "JLP",
+                "title": "Workspace root",
+                "content": "# Hello",
+            },
+        )
+
+    err_text = str(exc_info.value)
+    assert "JLP" in err_text and "confluence_create_space" in err_text, (
+        f"Permission error must hint at create_space. Got: {err_text!r}"
+    )
+    assert "403" in err_text or "404" in err_text or "not exist" in err_text, (
+        "Error should explain Confluence returns 403 for missing spaces."
+    )
+
+
+@pytest.mark.anyio
+async def test_create_page_other_error_unaffected(client, mock_confluence_fetcher):
+    """Non-permission errors must propagate verbatim (no hint added)."""
+    from fastmcp.exceptions import ToolError
+
+    mock_confluence_fetcher.create_page.side_effect = Exception(
+        "Network timeout reading Confluence"
+    )
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool(
+            "confluence_create_page",
+            {
+                "space_key": "TEAM",
+                "title": "T",
+                "content": "c",
+            },
+        )
+    err_text = str(exc_info.value)
+    assert "confluence_create_space" not in err_text, (
+        "Non-permission errors should NOT add the create_space hint."
+    )
+
+
+@pytest.mark.anyio
 async def test_create_space_private_with_description(client, mock_confluence_fetcher):
     """``is_private=True`` + description must propagate to the fetcher."""
     mock_confluence_fetcher.create_space.return_value = {

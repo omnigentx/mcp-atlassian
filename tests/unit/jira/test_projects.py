@@ -766,3 +766,130 @@ def test_create_project_version_error(projects_mixin: ProjectsMixin) -> None:
     ):
         with pytest.raises(Exception):
             projects_mixin.create_project_version("PROJ4", "v6.0")
+
+
+# ── create_project: payload composition + smart default for template ──
+#
+# Regression suite for 2026-05-16 incident (production agent could not
+# create Jira project JLP — 4 attempts all returned ``HTTP 400: Invalid
+# request payload`` because Jira Cloud REQUIRES ``projectTemplateKey``
+# but the tool description said it was optional).
+
+
+def _ok_response(payload: dict) -> Any:
+    """Helper: build a Jira ``advanced_mode`` response object."""
+    resp = MagicMock()
+    resp.status_code = 201
+    resp.json.return_value = payload
+    return resp
+
+
+def _err_response(body_text: str, status: int = 400, json_body: dict | None = None) -> Any:
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = body_text
+    if json_body is not None:
+        resp.json.return_value = json_body
+    else:
+        resp.json.side_effect = ValueError("not json")
+    return resp
+
+
+def test_create_project_fills_default_template_for_software(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """When caller passes empty/None ``project_template_key``, the mixin
+    MUST fill in the Cloud-required default for the given type. Without
+    this, Jira Cloud returns HTTP 400.
+    """
+    posted = {}
+
+    def _capture_post(path, json=None, advanced_mode=False):
+        posted["path"] = path
+        posted["json"] = json
+        return _ok_response({"id": "10010", "key": "JLP", "name": "JLP"})
+
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.side_effect = _capture_post
+    projects_mixin._markdown_to_jira = lambda x: x  # bypass conversion
+
+    projects_mixin.create_project(
+        key="JLP",
+        name="JLP",
+        project_type_key="software",
+        lead_account_id="5a0be2a37ae7bd77b1125ca8",
+        project_template_key="",  # ← incident-shape: empty string
+    )
+
+    sent = posted["json"]
+    assert sent["projectTemplateKey"] == (
+        "com.pyxis.greenhopper.jira:gh-simplified-agility-scrum"
+    ), (
+        "Empty template_key should default to Scrum agility for software type. "
+        f"Got: {sent.get('projectTemplateKey')!r}"
+    )
+
+
+def test_create_project_respects_explicit_template_key(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """Caller-provided template_key MUST NOT be overridden by the default."""
+    posted = {}
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.side_effect = lambda *a, **kw: (
+        posted.update({"json": kw.get("json")})
+        or _ok_response({"id": "1", "key": "OPS", "name": "OPS"})
+    )
+    projects_mixin._markdown_to_jira = lambda x: x
+
+    projects_mixin.create_project(
+        key="OPS",
+        name="OPS",
+        project_type_key="software",
+        lead_account_id="acc",
+        project_template_key="com.pyxis.greenhopper.jira:gh-simplified-agility-kanban",
+    )
+    assert posted["json"]["projectTemplateKey"] == (
+        "com.pyxis.greenhopper.jira:gh-simplified-agility-kanban"
+    )
+
+
+def test_create_project_error_surfaces_payload_and_raw_response(
+    projects_mixin: ProjectsMixin,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On 400 with no structured Jira error detail, the exception text
+    AND log line MUST include the sent payload + raw response body so
+    callers can diagnose missing/wrong fields without re-running.
+    """
+    import logging as _logging
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.return_value = _err_response(
+        "Invalid request payload. Refer to the REST API documentation and try again."
+    )
+    projects_mixin._markdown_to_jira = lambda x: x
+
+    with caplog.at_level(_logging.ERROR, logger="mcp-jira"):
+        with pytest.raises(Exception) as exc_info:
+            projects_mixin.create_project(
+                key="JLP",
+                name="JLP",
+                project_type_key="software",
+                lead_account_id="acc-id",
+                project_template_key="",  # default-filled to scrum
+            )
+
+    msg = str(exc_info.value)
+    assert "Sent payload" in msg, f"Exception text missing payload: {msg}"
+    assert '"projectTemplateKey"' in msg, (
+        "Sent payload must include the resolved template key so callers "
+        "can see what was actually sent to Jira."
+    )
+    assert "Raw response" in msg
+    assert "Invalid request payload" in msg
+
+    # Log line also carries diagnostic context.
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert error_records, "Expected at least one ERROR log on 400 response"
+    log_text = " ".join(r.getMessage() for r in error_records)
+    assert "JLP" in log_text and "payload=" in log_text

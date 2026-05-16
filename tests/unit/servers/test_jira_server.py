@@ -741,18 +741,25 @@ async def test_create_issue_accepts_json_string(jira_client, mock_jira_fetcher):
 
 @pytest.mark.anyio
 async def test_create_issue_additional_fields_empty_string(jira_client):
-    """Test that empty string additional_fields raises ToolError."""
-    with pytest.raises(ToolError) as excinfo:
-        await jira_client.call_tool(
-            "jira_create_issue",
-            {
-                "project_key": "TEST",
-                "summary": "Test issue",
-                "issue_type": "Task",
-                "additional_fields": "",
-            },
-        )
-    assert "not valid JSON" in str(excinfo.value)
+    """Empty-string ``additional_fields`` is treated as "no fields" (returns
+    ``{}``) — NOT a JSON parse error. The lenient handling lives at
+    ``_parse_additional_fields`` (line 96-97): ``if not value.strip(): return {}``.
+    This avoids forcing agents to omit the param entirely when their
+    template happens to fill in an empty default.
+    """
+    # Should succeed — empty string means "no additional fields", not a parse error.
+    response = await jira_client.call_tool(
+        "jira_create_issue",
+        {
+            "project_key": "TEST",
+            "summary": "Test issue",
+            "issue_type": "Task",
+            "additional_fields": "",
+        },
+    )
+    # Tool should complete and return the mocked issue payload.
+    result = json.loads(response.content[0].text)
+    assert "message" in result or "issue" in result or "key" in str(result)
 
 
 @pytest.mark.anyio
@@ -1675,17 +1682,20 @@ async def test_update_issue_additional_fields_non_dict_json(jira_client):
 
 @pytest.mark.anyio
 async def test_update_issue_additional_fields_empty_string(jira_client):
-    """Test that empty string additional_fields raises ToolError."""
-    with pytest.raises(ToolError) as excinfo:
-        await jira_client.call_tool(
-            "jira_update_issue",
-            {
-                "issue_key": "TEST-123",
-                "fields": '{"summary": "Updated"}',
-                "additional_fields": "",
-            },
-        )
-    assert "not valid JSON" in str(excinfo.value)
+    """Mirror of ``test_create_issue_additional_fields_empty_string`` for the
+    update path. Empty-string ``additional_fields`` is treated as "no fields",
+    not a parse error.
+    """
+    response = await jira_client.call_tool(
+        "jira_update_issue",
+        {
+            "issue_key": "TEST-123",
+            "fields": '{"summary": "Updated"}',
+            "additional_fields": "",
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert "message" in result or "issue" in result or "key" in str(result)
 
 
 @pytest.mark.anyio
@@ -1989,14 +1999,21 @@ async def test_get_issue_images_fetch_failure(jira_client, mock_jira_fetcher):
 
 @pytest.mark.anyio
 async def test_add_comment(jira_client, mock_jira_fetcher):
-    """Test add_comment accepts 'body' parameter matching response field name."""
+    """Test add_comment accepts 'body' parameter matching response field name.
+
+    ``JiraFetcher.add_comment`` was simplified upstream (commit 5bbe56f,
+    "fix(server): align MCP tool parameter names") from
+    ``(issue_key, comment, internal, public)`` → ``(issue_key, comment)``.
+    Visibility/internal-comment support was removed to prevent agent
+    parameter conflicts. Test pins the simplified 2-arg call.
+    """
     response = await jira_client.call_tool(
         "jira_add_comment",
         {"issue_key": "TEST-123", "body": "Test comment body"},
     )
 
     mock_jira_fetcher.add_comment.assert_called_once_with(
-        "TEST-123", "Test comment body", None, public=None
+        "TEST-123", "Test comment body"
     )
 
     result = json.loads(response.content[0].text)

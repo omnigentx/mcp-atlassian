@@ -692,6 +692,14 @@ async def create_page(
         # had an agent burn time retrying 403s on space JLP which had
         # never been created.
         err_text = str(e)
+        # ⚠️ STRING MATCH IS LOAD-BEARING — these markers come from the
+        # ``atlassian-python-api`` / Confluence REST error bodies. If
+        # Atlassian changes wording (e.g. "permission to access" instead
+        # of "permission to view"), this rewriter silently stops adding
+        # the hint and the next agent will re-discover the missing-space
+        # case the hard way. Re-verify against
+        # https://developer.atlassian.com/cloud/confluence/rest/v2/intro/
+        # if/when error format changes.
         permission_markers = (
             "permission to view the content",
             "no permission",

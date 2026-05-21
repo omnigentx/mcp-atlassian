@@ -934,3 +934,138 @@ def test_create_project_error_surfaces_payload_and_raw_response(
     assert error_records, "Expected at least one ERROR log on 400 response"
     log_text = " ".join(r.getMessage() for r in error_records)
     assert "JLP" in log_text and "payload=" in log_text
+
+
+# ── create_project: trashed-key collision probe ──
+#
+# Regression for 2026-05-20 incident (agile-team_02cef7e8 / Jesse [PM]):
+# project JLP was soft-deleted on 2026-05-19. Atlassian Cloud holds the
+# key reserved for ~30 days. Agent kept retrying ``create_project(key=
+# "JLP")`` and got the generic ``HTTP 400: ... uses this project key``
+# 7 times in a row, because Atlassian's error gives no hint that the
+# key is held by a trashed (vs live) project. The mixin must probe the
+# trash and surface an actionable next-step error so the agent stops
+# retrying.
+
+
+def test_create_project_detects_trashed_key_collision(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """When Atlassian returns 400 'uses this project key', the mixin
+    MUST probe the trash and raise an actionable error explaining
+    restore / purge / new-key options.
+    """
+    err_json = {
+        "errors": {
+            "projectKey": "Project 'Jarvis Product Landing Page' uses this project key.",
+        }
+    }
+    err_resp = _err_response(
+        "uses this project key",
+        status=400,
+        json_body=err_json,
+    )
+
+    trash_payload = {
+        "total": 1,
+        "values": [
+            {
+                "id": "10042",
+                "key": "JLP",
+                "name": "Jarvis Product Landing Page",
+                "deletedDate": "2026-05-19T21:07:44.424+0700",
+            }
+        ],
+    }
+
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.return_value = err_resp
+    projects_mixin.jira.get.return_value = trash_payload
+    projects_mixin._markdown_to_jira = lambda x: x
+
+    with pytest.raises(Exception) as exc_info:
+        projects_mixin.create_project(
+            key="JLP",
+            name="JLP",
+            project_type_key="software",
+            lead_account_id="acc",
+        )
+
+    msg = str(exc_info.value)
+    assert "soft-deleted" in msg, (
+        f"Trash detection must surface in error message. Got: {msg}"
+    )
+    assert "2026-05-19" in msg, "Deleted date must be visible to caller"
+    assert "RESTORE" in msg and "PURGE" in msg, (
+        "Caller must see both restore and purge action options"
+    )
+    assert "DIFFERENT key" in msg, "Caller must see alternative-key option"
+    assert "10042" in msg, "Project ID must be in error for purge URL"
+
+    # Trash probe MUST hit the search endpoint with status=deleted
+    projects_mixin.jira.get.assert_called_once()
+    call_args = projects_mixin.jira.get.call_args
+    assert "rest/api/3/project/search" in call_args[0][0]
+    params = call_args[1].get("params") or call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params")
+    assert params.get("status") == "deleted"
+    assert params.get("query") == "JLP"
+
+
+def test_create_project_trash_probe_failure_falls_back_to_original_400(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """If the trash-probe itself fails (network/permissions), the
+    original ambiguous 400 must still surface — the probe is additive
+    enrichment, not a hard dependency.
+    """
+    err_resp = _err_response(
+        "uses this project key",
+        status=400,
+        json_body={"errors": {"projectKey": "uses this project key"}},
+    )
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.return_value = err_resp
+    projects_mixin.jira.get.side_effect = RuntimeError("probe network error")
+    projects_mixin._markdown_to_jira = lambda x: x
+
+    with pytest.raises(Exception) as exc_info:
+        projects_mixin.create_project(
+            key="JLP",
+            name="JLP",
+            project_type_key="software",
+            lead_account_id="acc",
+        )
+
+    msg = str(exc_info.value)
+    # Falls through to the original generic error path
+    assert "Failed to create project (HTTP 400)" in msg
+    assert "Sent payload" in msg
+
+
+def test_create_project_trash_probe_skipped_for_non_collision_400(
+    projects_mixin: ProjectsMixin,
+) -> None:
+    """A 400 with a DIFFERENT error (not key-collision) must NOT trigger
+    the trash probe — we only want the enrichment for the specific
+    ambiguous case Atlassian surfaces for trashed keys.
+    """
+    err_resp = _err_response(
+        "Invalid request payload",
+        status=400,
+        json_body={"errorMessages": ["Invalid request payload"]},
+    )
+    projects_mixin.jira = MagicMock()
+    projects_mixin.jira.post.return_value = err_resp
+    projects_mixin.jira.get.return_value = {"total": 0, "values": []}
+    projects_mixin._markdown_to_jira = lambda x: x
+
+    with pytest.raises(Exception):
+        projects_mixin.create_project(
+            key="JLP",
+            name="JLP",
+            project_type_key="software",
+            lead_account_id="acc",
+        )
+
+    # Probe must be skipped to avoid wasted API calls
+    projects_mixin.jira.get.assert_not_called()

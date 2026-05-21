@@ -582,6 +582,25 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
                     key.upper(), response.status_code, error_detail,
                     payload_repr, raw_response,
                 )
+                # Atlassian Cloud holds soft-deleted projects in a trash
+                # bin for ~30 days before purging. During that window
+                # ``GET /rest/api/3/project/KEY`` returns 404 (project
+                # appears gone), but ``POST /rest/api/3/project`` with the
+                # same key fails with a generic 400 "uses this project key"
+                # — Atlassian gives no hint that the key is reserved by a
+                # trashed project, not a live one. Agents see this as a
+                # mysterious conflict and retry forever (production
+                # 2026-05-20: 7 identical retries against trashed JLP).
+                # Probe the trash so the caller learns the actual cause
+                # and gets an actionable next step.
+                key_upper = key.upper()
+                if (
+                    response.status_code == 400
+                    and "uses this project key" in (error_detail or "").lower()
+                ):
+                    trash_hint = self._probe_trashed_project_key(key_upper)
+                    if trash_hint:
+                        raise Exception(trash_hint)
                 error_message = (
                     f"Failed to create project (HTTP {response.status_code}): "
                     f"{error_detail}. Sent payload: {payload_repr}. "
@@ -591,3 +610,48 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
         except Exception as e:
             logger.error(f"Error creating Jira project {key}: {e}", exc_info=True)
             raise
+
+    def _probe_trashed_project_key(self, key: str) -> str | None:
+        """Check whether ``key`` is reserved by a soft-deleted (trashed)
+        project on Atlassian Cloud.
+
+        Returns an actionable error message if the key is in trash, else
+        ``None``. The message tells the agent the three concrete next
+        steps (restore / purge / different key) so it stops retrying.
+
+        Best-effort: any exception during the probe returns ``None`` so
+        the original ambiguous 400 still surfaces — the probe is purely
+        additive enrichment.
+        """
+        try:
+            response = self.jira.get(
+                "rest/api/3/project/search",
+                params={"query": key, "status": "deleted", "maxResults": 5},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Trash-probe failed for project key=%s: %s. "
+                "Falling back to ambiguous 400.", key, exc,
+            )
+            return None
+        if not isinstance(response, dict):
+            return None
+        for project in response.get("values", []) or []:
+            if not isinstance(project, dict):
+                continue
+            if (project.get("key") or "").upper() != key:
+                continue
+            deleted_date = project.get("deletedDate") or "<unknown>"
+            project_id = project.get("id") or "<unknown>"
+            return (
+                f"Project key {key!r} is reserved by a soft-deleted project "
+                f"(name={project.get('name')!r}, deleted={deleted_date}, "
+                f"id={project_id}). Atlassian Cloud holds the key for ~30 "
+                f"days before purging. Next steps: "
+                f"(1) RESTORE the project — `PUT /rest/api/3/project/{key}/restore` — "
+                f"if you want to keep its history; "
+                f"(2) PURGE it now — `DELETE /rest/api/3/project/{project_id}?enableUndo=false` — "
+                f"to free the key immediately (irreversible); "
+                f"(3) Use a DIFFERENT key. Retrying with the same key will keep failing."
+            )
+        return None

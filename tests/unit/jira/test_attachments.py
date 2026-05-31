@@ -637,6 +637,33 @@ class TestAttachmentsMixin:
             assert result["success"] is False
             assert "Failed to upload attachment" in result["error"]
 
+    def test_upload_attachment_unwraps_list_response(
+        self, attachments_mixin: AttachmentsMixin
+    ):
+        """Jira REST returns a LIST of attachment objects (not a dict).
+
+        Regression guard: previously the code checked `isinstance(attachment, dict)`
+        and returned `id: None` when the real client passed back a list — verified
+        live against phucnv31.atlassian.net. This test pins the unwrap so a future
+        refactor can't silently re-break id extraction.
+        """
+        attachments_mixin.jira.add_attachment.return_value = [
+            {"id": "98765", "filename": "screenshot.png", "size": 2048},
+        ]
+
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.path.getsize", return_value=2048),
+            patch("os.path.isabs", return_value=True),
+            patch("os.path.basename", return_value="screenshot.png"),
+        ):
+            result = attachments_mixin.upload_attachment(
+                "TEST-123", "/abs/screenshot.png"
+            )
+
+            assert result["success"] is True
+            assert result["id"] == "98765"
+
     # Tests for upload_attachments method
 
     def test_upload_attachments_success(self, attachments_mixin: AttachmentsMixin):

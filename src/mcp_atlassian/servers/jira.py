@@ -937,6 +937,96 @@ async def download_attachments(
 
 
 @jira_mcp.tool(
+    tags={"jira", "write", "attachments", "toolset:jira_attachments"},
+    annotations={"title": "Upload Attachment", "destructiveHint": True},
+)
+@check_write_access
+async def upload_attachment(
+    ctx: Context,
+    issue_key: Annotated[
+        str,
+        Field(
+            description="Jira issue key (e.g., 'PROJ-123', 'ACV2-642')",
+            pattern=ISSUE_KEY_PATTERN,
+        ),
+    ],
+    file_path: Annotated[
+        str,
+        Field(
+            description=(
+                "Full path to the file to upload. Can be absolute "
+                "(e.g., '/tmp/screenshot.png') or relative to the current "
+                "working directory (e.g., './uploads/log.txt'). The filename "
+                "in Jira will be the file's basename."
+            )
+        ),
+    ],
+) -> str:
+    """Upload a single attachment to a Jira issue.
+
+    Useful for attaching screenshots, log files, or any supporting media
+    to a Jira issue. The file must already exist on disk — combine with the
+    filesystem MCP `write_file` tool when uploading base64 content (e.g.,
+    a Figma `export_image` result or Playwright `browser_take_screenshot`).
+
+    Args:
+        ctx: The FastMCP context.
+        issue_key: The Jira issue key.
+        file_path: Path to the file to upload.
+
+    Returns:
+        JSON string with upload result (success flag, issue_key, filename,
+        size, attachment id) or error details.
+    """
+    jira = await get_jira_fetcher(ctx)
+    result = jira.upload_attachment(issue_key=issue_key, file_path=file_path)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "attachments", "toolset:jira_attachments"},
+    annotations={"title": "Upload Multiple Attachments", "destructiveHint": True},
+)
+@check_write_access
+async def upload_attachments(
+    ctx: Context,
+    issue_key: Annotated[
+        str,
+        Field(
+            description="Jira issue key (e.g., 'PROJ-123', 'ACV2-642')",
+            pattern=ISSUE_KEY_PATTERN,
+        ),
+    ],
+    file_paths: Annotated[
+        str,
+        Field(
+            description=(
+                "Comma-separated list of file paths to upload. Each path can "
+                "be absolute or relative. Example: '/tmp/a.png,./b.log,c.pdf'."
+            )
+        ),
+    ],
+) -> str:
+    """Upload multiple attachments to a Jira issue in one call.
+
+    More efficient than calling upload_attachment repeatedly. Returns a
+    per-file breakdown of uploaded vs failed.
+
+    Args:
+        ctx: The FastMCP context.
+        issue_key: The Jira issue key.
+        file_paths: Comma-separated paths.
+
+    Returns:
+        JSON string with `uploaded` and `failed` arrays.
+    """
+    jira = await get_jira_fetcher(ctx)
+    paths_list = [p.strip() for p in file_paths.split(",") if p.strip()]
+    result = jira.upload_attachments(issue_key=issue_key, file_paths=paths_list)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@jira_mcp.tool(
     tags={"jira", "read", "attachments", "toolset:jira_attachments"},
     annotations={"title": "Get Issue Images", "readOnlyHint": True},
 )

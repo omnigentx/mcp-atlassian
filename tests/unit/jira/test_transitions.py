@@ -553,3 +553,94 @@ class TestTransitionsMixin:
             transition_data["update"]["comment"][0]["add"]["body"]
             == "Converted comment"
         )
+
+    # ── ADF comment routing to v3 on Cloud ──
+    #
+    # Regression for 2026-05-20 incident (agile-team_02cef7e8): 14 calls
+    # to ``jira_transition_issue`` with markdown ``comment`` arguments
+    # all failed with "Operation value must be an Atlassian Document".
+    # Root cause: on Cloud, ``_markdown_to_jira`` returns an ADF dict;
+    # the lib's ``set_issue_status`` POSTs to ``/rest/api/2/issue/{key}/
+    # transitions`` which doesn't accept ADF dicts as comment bodies.
+    # Same shape as worklog fix in commit 9db6657 — route through v3.
+
+    def test_transition_issue_routes_adf_comment_through_v3_on_cloud(
+        self, transitions_mixin: TransitionsMixin
+    ) -> None:
+        """When the comment converts to an ADF dict on Cloud, the call
+        MUST go through v3 (``_post_api3``) — NOT the lib's v2-bound
+        ``set_issue_status``. Otherwise Atlassian rejects with
+        "Operation value must be an Atlassian Document".
+        """
+        # Cloud + markdown comment that converts to ADF
+        transitions_mixin.config = MagicMock()
+        transitions_mixin.config.is_cloud = True
+        adf_doc = {
+            "version": 1,
+            "type": "doc",
+            "content": [{"type": "paragraph", "content": [
+                {"type": "text", "text": "**Jesse [PM]:** moved to In Progress"}
+            ]}],
+        }
+        transitions_mixin._markdown_to_jira = MagicMock(return_value=adf_doc)
+        transitions_mixin._post_api3 = MagicMock(return_value={})
+
+        transitions_mixin.transition_issue(
+            "JARLP-1", "21", comment="**Jesse [PM]:** moved to In Progress"
+        )
+
+        # v3 endpoint MUST be used (with full payload including update)
+        transitions_mixin._post_api3.assert_called_once()
+        call = transitions_mixin._post_api3.call_args
+        assert call.args[0] == "issue/JARLP-1/transitions"
+        body = call.kwargs.get("data") or (call.args[1] if len(call.args) > 1 else None)
+        assert isinstance(body, dict)
+        assert body["transition"] == {"id": "21"}
+        # Comment body in the update operation MUST be the ADF dict
+        comment_body = body["update"]["comment"][0]["add"]["body"]
+        assert comment_body == adf_doc, (
+            "v3 transition payload must carry the ADF dict, not a string"
+        )
+
+        # The lib's v2-bound set_issue_status MUST NOT be called when
+        # the comment body is ADF — that's the bug we're fixing.
+        transitions_mixin.jira.set_issue_status.assert_not_called()
+
+    def test_transition_issue_uses_v2_for_string_comment(
+        self, transitions_mixin: TransitionsMixin
+    ) -> None:
+        """Plain-string comments (Server/DC, or Cloud after wiki markup
+        conversion) MUST continue to use the lib's ``set_issue_status``
+        path — only ADF dicts need the v3 detour.
+        """
+        transitions_mixin.config = MagicMock()
+        transitions_mixin.config.is_cloud = False  # Server/DC
+        transitions_mixin._markdown_to_jira = MagicMock(
+            return_value="*bold* wiki markup comment"
+        )
+        transitions_mixin._post_api3 = MagicMock()
+
+        transitions_mixin.transition_issue(
+            "TEST-1", "10", comment="**bold** comment"
+        )
+
+        # v3 path NOT triggered for string body
+        transitions_mixin._post_api3.assert_not_called()
+        # v2 path used as normal
+        transitions_mixin.jira.set_issue_status.assert_called_once()
+
+    def test_transition_issue_uses_v2_for_no_comment_even_on_cloud(
+        self, transitions_mixin: TransitionsMixin
+    ) -> None:
+        """No-comment transitions on Cloud have nothing ADF-shaped to
+        route, so they keep the v2 ``set_issue_status`` path. Avoids
+        unnecessary divergence.
+        """
+        transitions_mixin.config = MagicMock()
+        transitions_mixin.config.is_cloud = True
+        transitions_mixin._post_api3 = MagicMock()
+
+        transitions_mixin.transition_issue("TEST-1", "10")  # no comment
+
+        transitions_mixin._post_api3.assert_not_called()
+        transitions_mixin.jira.set_issue_status.assert_called_once()

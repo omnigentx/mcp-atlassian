@@ -197,8 +197,40 @@ class TransitionsMixin(JiraClient, IssueOperationsProto, UsersOperationsProto):
             )
             logger.debug(f"Fields: {fields_for_api}, Update: {update_for_api}")
 
+            # Detect ADF comment body — ``_markdown_to_jira`` returns dict
+            # on Cloud, str on Server/DC. v2 transitions endpoint rejects
+            # ADF dicts with "Operation value must be an Atlassian Document"
+            # (production 2026-05-20: 14 errors against agile-team_02cef7e8).
+            # Route through v3 explicitly, matching the worklog fix in
+            # commit 9db6657. Same root cause: ADF comments must go via v3.
+            comment_body = None
+            if isinstance(update_for_api, dict):
+                comment_ops = update_for_api.get("comment") or []
+                if isinstance(comment_ops, list) and comment_ops:
+                    first = comment_ops[0]
+                    if isinstance(first, dict):
+                        add_op = first.get("add") or {}
+                        if isinstance(add_op, dict):
+                            comment_body = add_op.get("body")
+            needs_v3 = isinstance(comment_body, dict) and self.config.is_cloud
+
             # Transition using the appropriate method
-            if target_status_name:
+            if needs_v3:
+                logger.info(
+                    "Routing transition for %s through v3 (ADF comment body)",
+                    issue_key,
+                )
+                payload_v3: dict[str, Any] = {
+                    "transition": {"id": str(normalized_transition_id)},
+                }
+                if fields_for_api:
+                    payload_v3["fields"] = fields_for_api
+                if update_for_api:
+                    payload_v3["update"] = update_for_api
+                self._post_api3(
+                    f"issue/{issue_key}/transitions", data=payload_v3
+                )
+            elif target_status_name:
                 logger.info(f"Using status name '{target_status_name}' for transition")
                 self.jira.set_issue_status(
                     issue_key=issue_key,

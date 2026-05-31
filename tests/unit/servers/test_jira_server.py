@@ -392,6 +392,8 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
         create_sprint,
         delete_issue,
         download_attachments,
+        upload_attachment,
+        upload_attachments,
         get_my_account_id,
         edit_comment,
         get_agile_boards,
@@ -435,6 +437,8 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
     jira_sub_mcp.add_tool(get_transitions)
     jira_sub_mcp.add_tool(get_worklog)
     jira_sub_mcp.add_tool(download_attachments)
+    jira_sub_mcp.add_tool(upload_attachment)
+    jira_sub_mcp.add_tool(upload_attachments)
     jira_sub_mcp.add_tool(get_issue_images)
     jira_sub_mcp.add_tool(get_field_options)
     jira_sub_mcp.add_tool(get_agile_boards)
@@ -741,18 +745,25 @@ async def test_create_issue_accepts_json_string(jira_client, mock_jira_fetcher):
 
 @pytest.mark.anyio
 async def test_create_issue_additional_fields_empty_string(jira_client):
-    """Test that empty string additional_fields raises ToolError."""
-    with pytest.raises(ToolError) as excinfo:
-        await jira_client.call_tool(
-            "jira_create_issue",
-            {
-                "project_key": "TEST",
-                "summary": "Test issue",
-                "issue_type": "Task",
-                "additional_fields": "",
-            },
-        )
-    assert "not valid JSON" in str(excinfo.value)
+    """Empty-string ``additional_fields`` is treated as "no fields" (returns
+    ``{}``) — NOT a JSON parse error. The lenient handling lives at
+    ``_parse_additional_fields`` (line 96-97): ``if not value.strip(): return {}``.
+    This avoids forcing agents to omit the param entirely when their
+    template happens to fill in an empty default.
+    """
+    # Should succeed — empty string means "no additional fields", not a parse error.
+    response = await jira_client.call_tool(
+        "jira_create_issue",
+        {
+            "project_key": "TEST",
+            "summary": "Test issue",
+            "issue_type": "Task",
+            "additional_fields": "",
+        },
+    )
+    # Tool should complete and return the mocked issue payload.
+    result = json.loads(response.content[0].text)
+    assert "message" in result or "issue" in result or "key" in str(result)
 
 
 @pytest.mark.anyio
@@ -1675,17 +1686,20 @@ async def test_update_issue_additional_fields_non_dict_json(jira_client):
 
 @pytest.mark.anyio
 async def test_update_issue_additional_fields_empty_string(jira_client):
-    """Test that empty string additional_fields raises ToolError."""
-    with pytest.raises(ToolError) as excinfo:
-        await jira_client.call_tool(
-            "jira_update_issue",
-            {
-                "issue_key": "TEST-123",
-                "fields": '{"summary": "Updated"}',
-                "additional_fields": "",
-            },
-        )
-    assert "not valid JSON" in str(excinfo.value)
+    """Mirror of ``test_create_issue_additional_fields_empty_string`` for the
+    update path. Empty-string ``additional_fields`` is treated as "no fields",
+    not a parse error.
+    """
+    response = await jira_client.call_tool(
+        "jira_update_issue",
+        {
+            "issue_key": "TEST-123",
+            "fields": '{"summary": "Updated"}',
+            "additional_fields": "",
+        },
+    )
+    result = json.loads(response.content[0].text)
+    assert "message" in result or "issue" in result or "key" in str(result)
 
 
 @pytest.mark.anyio
@@ -1845,6 +1859,101 @@ async def test_download_attachments_allows_normal_size(jira_client, mock_jira_fe
     assert len(response.content) == 2
 
 
+# ── jira_upload_attachment / jira_upload_attachments tests ────────────
+
+
+@pytest.mark.anyio
+async def test_upload_attachment_success(jira_client, mock_jira_fetcher):
+    """Single-file upload happy path delegates to fetcher and returns JSON."""
+    mock_jira_fetcher.upload_attachment.return_value = {
+        "success": True,
+        "issue_key": "TEST-123",
+        "filename": "shot.png",
+        "size": 42,
+        "id": "10042",
+    }
+
+    response = await jira_client.call_tool(
+        "jira_upload_attachment",
+        {"issue_key": "TEST-123", "file_path": "/tmp/shot.png"},
+    )
+
+    mock_jira_fetcher.upload_attachment.assert_called_once_with(
+        issue_key="TEST-123", file_path="/tmp/shot.png"
+    )
+    payload = json.loads(response.content[0].text)
+    assert payload["success"] is True
+    assert payload["filename"] == "shot.png"
+    assert payload["id"] == "10042"
+
+
+@pytest.mark.anyio
+async def test_upload_attachment_propagates_failure(jira_client, mock_jira_fetcher):
+    """Failure from fetcher (e.g. missing file) is surfaced verbatim, not swallowed."""
+    mock_jira_fetcher.upload_attachment.return_value = {
+        "success": False,
+        "error": "File not found: /tmp/missing.png",
+    }
+
+    response = await jira_client.call_tool(
+        "jira_upload_attachment",
+        {"issue_key": "TEST-123", "file_path": "/tmp/missing.png"},
+    )
+
+    payload = json.loads(response.content[0].text)
+    assert payload["success"] is False
+    assert "File not found" in payload["error"]
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_splits_comma_list(jira_client, mock_jira_fetcher):
+    """Comma-separated paths are split + stripped before delegation."""
+    mock_jira_fetcher.upload_attachments.return_value = {
+        "success": True,
+        "issue_key": "TEST-123",
+        "total": 2,
+        "uploaded": [
+            {"filename": "a.png", "size": 10, "id": "1"},
+            {"filename": "b.log", "size": 20, "id": "2"},
+        ],
+        "failed": [],
+    }
+
+    response = await jira_client.call_tool(
+        "jira_upload_attachments",
+        {"issue_key": "TEST-123", "file_paths": " /tmp/a.png , /tmp/b.log "},
+    )
+
+    mock_jira_fetcher.upload_attachments.assert_called_once_with(
+        issue_key="TEST-123", file_paths=["/tmp/a.png", "/tmp/b.log"]
+    )
+    payload = json.loads(response.content[0].text)
+    assert payload["total"] == 2
+    assert len(payload["uploaded"]) == 2
+    assert payload["failed"] == []
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_drops_empty_tokens(jira_client, mock_jira_fetcher):
+    """Empty tokens between commas are ignored, not passed as ''."""
+    mock_jira_fetcher.upload_attachments.return_value = {
+        "success": True,
+        "issue_key": "TEST-123",
+        "total": 1,
+        "uploaded": [{"filename": "a.png", "size": 10, "id": "1"}],
+        "failed": [],
+    }
+
+    await jira_client.call_tool(
+        "jira_upload_attachments",
+        {"issue_key": "TEST-123", "file_paths": "/tmp/a.png,,, ,"},
+    )
+
+    mock_jira_fetcher.upload_attachments.assert_called_once_with(
+        issue_key="TEST-123", file_paths=["/tmp/a.png"]
+    )
+
+
 # ── jira_get_issue_images tests ──────────────────────────────────────
 
 
@@ -1989,14 +2098,21 @@ async def test_get_issue_images_fetch_failure(jira_client, mock_jira_fetcher):
 
 @pytest.mark.anyio
 async def test_add_comment(jira_client, mock_jira_fetcher):
-    """Test add_comment accepts 'body' parameter matching response field name."""
+    """Test add_comment accepts 'body' parameter matching response field name.
+
+    ``JiraFetcher.add_comment`` was simplified upstream (commit 5bbe56f,
+    "fix(server): align MCP tool parameter names") from
+    ``(issue_key, comment, internal, public)`` → ``(issue_key, comment)``.
+    Visibility/internal-comment support was removed to prevent agent
+    parameter conflicts. Test pins the simplified 2-arg call.
+    """
     response = await jira_client.call_tool(
         "jira_add_comment",
         {"issue_key": "TEST-123", "body": "Test comment body"},
     )
 
     mock_jira_fetcher.add_comment.assert_called_once_with(
-        "TEST-123", "Test comment body", None, public=None
+        "TEST-123", "Test comment body"
     )
 
     result = json.loads(response.content[0].text)

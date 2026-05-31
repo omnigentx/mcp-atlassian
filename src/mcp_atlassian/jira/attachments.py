@@ -381,14 +381,22 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
 
             logger.info(f"Uploading attachment from {file_path} to issue {issue_key}")
 
-            # Use the Jira API to upload the file
+            # atlassian-python-api opens the file internally — no need to open it
+            # here. Jira's REST API returns an array of attachment objects
+            # (one per uploaded file), so unwrap the first element to read `id`.
             filename = os.path.basename(file_path)
-            with open(file_path, "rb") as file:
-                attachment = self.jira.add_attachment(
-                    issue_key=issue_key, filename=file_path
-                )
+            attachment = self.jira.add_attachment(
+                issue_key=issue_key, filename=file_path
+            )
 
             if attachment:
+                record: dict[str, Any] = {}
+                if isinstance(attachment, list) and attachment:
+                    if isinstance(attachment[0], dict):
+                        record = attachment[0]
+                elif isinstance(attachment, dict):
+                    record = attachment
+
                 file_size = os.path.getsize(file_path)
                 logger.info(
                     f"Successfully uploaded attachment {filename} to {issue_key} (size: {file_size} bytes)"
@@ -398,9 +406,7 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                     "issue_key": issue_key,
                     "filename": filename,
                     "size": file_size,
-                    "id": attachment.get("id")
-                    if isinstance(attachment, dict)
-                    else None,
+                    "id": record.get("id"),
                 }
             else:
                 logger.error(f"Failed to upload attachment {filename} to {issue_key}")

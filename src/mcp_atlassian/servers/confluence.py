@@ -21,6 +21,7 @@ from mcp_atlassian.utils.media import (
     fetch_and_encode_attachment,
     is_image_attachment,
 )
+from mcp_atlassian.utils.response_projection import confluence_page_metadata
 from mcp_atlassian.utils.urls import resolve_relative_url
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,17 @@ async def get_page(
             default=True,
         ),
     ] = True,
+    response_mode: Annotated[
+        str,
+        Field(
+            description=(
+                "'full' includes the page body; 'metadata' returns identity, "
+                "URL, version and attachment manifest without body text. "
+                "Use metadata for change checks before reading full content."
+            ),
+            pattern="^(full|metadata)$",
+        ),
+    ] = "full",
 ) -> str:
     """Get content of a specific Confluence page by its ID, or by its title and space key.
 
@@ -194,6 +206,8 @@ async def get_page(
         JSON string representing the page content and/or metadata, or an error if not found or parameters are invalid.
     """
     confluence_fetcher = await get_confluence_fetcher(ctx)
+    if response_mode not in {"full", "metadata"}:
+        raise ValueError("response_mode must be 'full' or 'metadata'")
     page_object = None
 
     if page_id:
@@ -238,9 +252,17 @@ async def get_page(
         )
 
     if include_metadata:
-        result = {"metadata": page_object.to_simplified_dict()}
+        page = page_object.to_simplified_dict()
+        result = {"metadata": (
+            confluence_page_metadata(page) if response_mode == "metadata" else page
+        )}
     else:
-        result = {"content": {"value": page_object.content}}
+        if response_mode == "metadata":
+            result = {"metadata": confluence_page_metadata(
+                page_object.to_simplified_dict()
+            )}
+        else:
+            result = {"content": {"value": page_object.content}}
 
     return json.dumps(result, indent=2, ensure_ascii=False)
 

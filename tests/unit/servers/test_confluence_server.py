@@ -396,6 +396,19 @@ async def test_get_page(client, mock_confluence_fetcher):
 
 
 @pytest.mark.anyio
+async def test_get_page_metadata_mode_omits_body(client, mock_confluence_fetcher):
+    """A version check should not return the full page into model context."""
+    response = await client.call_tool(
+        "confluence_get_page", {"page_id": "123456", "response_mode": "metadata"}
+    )
+    page = json.loads(response.content[0].text)["metadata"]
+    assert page["id"] == "123456"
+    assert "content" not in page
+    assert page["has_content"] is True
+    assert page["content_characters"] > 0
+
+
+@pytest.mark.anyio
 async def test_get_page_no_metadata(client, mock_confluence_fetcher):
     """Test get_page with metadata disabled."""
     response = await client.call_tool(

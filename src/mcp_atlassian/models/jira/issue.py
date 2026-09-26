@@ -61,6 +61,7 @@ class JiraIssue(ApiModel, TimestampMixin):
     key: str = JIRA_DEFAULT_KEY
     summary: str = EMPTY_STRING
     description: str | None = None
+    description_field_returned: bool = Field(default=False, exclude=True)
     created: str = EMPTY_STRING
     updated: str = EMPTY_STRING
     status: JiraStatus | None = None
@@ -274,6 +275,8 @@ class JiraIssue(ApiModel, TimestampMixin):
         if isinstance(raw_description, dict):
             # Convert ADF to plain text
             description = adf_to_text(raw_description)
+            if description is None and raw_description.get("content") == []:
+                description = ""
         else:
             description = raw_description
 
@@ -455,6 +458,7 @@ class JiraIssue(ApiModel, TimestampMixin):
             key=key,
             summary=summary,
             description=description,
+            description_field_returned="description" in fields,
             created=created,
             updated=updated,
             status=status,
@@ -508,8 +512,11 @@ class JiraIssue(ApiModel, TimestampMixin):
         if self.url and should_include_field("url"):
             result["url"] = self.url
 
-        # Add description if available and requested
-        if self.description and should_include_field("description"):
+        # Preserve an explicitly returned empty/null description; omission means
+        # Jira did not return the field (or the caller did not request it).
+        if should_include_field("description") and (
+            self.description is not None or self.description_field_returned
+        ):
             result["description"] = self.description
 
         # Add status if available and requested
@@ -675,7 +682,7 @@ class JiraIssue(ApiModel, TimestampMixin):
                                 output_value_obj["name"] = field_data_obj["name"]
                             result[full_id] = output_value_obj
 
-        return {k: v for k, v in result.items() if v is not None}
+        return {k: v for k, v in result.items() if v is not None or k == "description"}
 
     def _process_custom_field_value(self, field_value: Any) -> Any:
         """

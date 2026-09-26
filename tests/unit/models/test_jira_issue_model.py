@@ -255,6 +255,38 @@ class TestJiraIssue:
         assert issue.security is None
         assert issue.worklog is None
 
+    @pytest.mark.parametrize(
+        ("fields", "expected_description"),
+        [
+            ({"description": {"type": "doc", "version": 1, "content": []}}, ""),
+            ({"description": None}, None),
+            ({"description": ""}, ""),
+            ({"description": "Some details"}, "Some details"),
+        ],
+    )
+    def test_returned_description_keeps_empty_and_null_values(
+        self, fields, expected_description
+    ):
+        issue = JiraIssue.from_api_response(
+            {"id": "1", "key": "SCRUM-1", "fields": fields},
+            requested_fields=["description"],
+        )
+
+        assert issue.to_simplified_dict()["description"] == expected_description
+
+    def test_description_absent_when_not_returned_or_not_requested(self):
+        absent = JiraIssue.from_api_response(
+            {"id": "1", "key": "SCRUM-1", "fields": {}},
+            requested_fields=["description"],
+        )
+        not_requested = JiraIssue.from_api_response(
+            {"id": "1", "key": "SCRUM-1", "fields": {"description": "details"}},
+            requested_fields=["summary"],
+        )
+
+        assert "description" not in absent.to_simplified_dict()
+        assert "description" not in not_requested.to_simplified_dict()
+
     def test_to_simplified_dict(self, jira_issue_data):
         """Test converting a JiraIssue to a simplified dictionary."""
         issue = JiraIssue.from_api_response(jira_issue_data)

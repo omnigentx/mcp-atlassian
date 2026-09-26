@@ -621,6 +621,36 @@ async def test_search_brief_keeps_navigation_and_requests_fewer_fields(
 
 
 @pytest.mark.anyio
+async def test_empty_description_survives_full_search_and_get_issue(
+    jira_client, mock_jira_fetcher
+):
+    """An empty ADF body is explicit in full MCP results, absent in brief."""
+    from mcp_atlassian.models.jira import JiraIssue, JiraSearchResult
+
+    api_issue = {
+        "id": "1",
+        "key": "TEST-1",
+        "fields": {"description": {"type": "doc", "version": 1, "content": []}},
+    }
+    mock_jira_fetcher.get_issue.side_effect = None
+    mock_jira_fetcher.get_issue.return_value = JiraIssue.from_api_response(api_issue)
+    mock_jira_fetcher.search_issues.side_effect = None
+    mock_jira_fetcher.search_issues.return_value = JiraSearchResult.from_api_response(
+        {"issues": [api_issue], "total": 1}
+    )
+
+    full_search = await jira_client.call_tool("jira_search", {"jql": "project = TEST"})
+    brief_search = await jira_client.call_tool(
+        "jira_search", {"jql": "project = TEST", "response_mode": "brief"}
+    )
+    detail = await jira_client.call_tool("jira_get_issue", {"issue_key": "TEST-1"})
+
+    assert json.loads(full_search.content[0].text)["issues"][0]["description"] == ""
+    assert "description" not in json.loads(brief_search.content[0].text)["issues"][0]
+    assert json.loads(detail.content[0].text)["description"] == ""
+
+
+@pytest.mark.anyio
 async def test_attachment_manifest_and_selected_fetch(jira_client, mock_jira_fetcher):
     """Listing files is cheap; downloading one never fetches its siblings."""
     from types import SimpleNamespace

@@ -250,10 +250,10 @@ class TestToolsetTagCompleteness:
     def test_jira_tool_count(self, jira_tools):
         """Verify expected number of Jira tools.
 
-        Count: 51 upstream + 2 added in jarvis fork (`upload_attachment`,
-        `upload_attachments`) = 53. Bump deliberately when adding tools.
+        Count: 51 upstream + 2 upload tools + 2 selective attachment tools
+        in the Jarvis fork = 55. Bump deliberately when adding tools.
         """
-        assert len(jira_tools) == 53, f"Expected 53 Jira tools, got {len(jira_tools)}"
+        assert len(jira_tools) == 55, f"Expected 55 Jira tools, got {len(jira_tools)}"
 
     def test_confluence_tool_count(self, confluence_tools):
         """Verify expected number of Confluence tools."""

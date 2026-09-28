@@ -820,6 +820,24 @@ class TestAttachmentsMixin:
         result = attachments_mixin.fetch_attachment_content("")
         assert result is None
 
+    def test_fetch_attachment_content_stops_at_limit(
+        self, attachments_mixin: AttachmentsMixin
+    ):
+        """A misleading attachment size must not cause an unbounded read."""
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [b"abcd", b"efgh", b"extra"]
+        attachments_mixin.jira._session.get.return_value = mock_response
+
+        result = attachments_mixin.fetch_attachment_content(
+            "https://test.url/attachment", max_bytes=5
+        )
+
+        assert result is None
+        mock_response.close.assert_called_once()
+        attachments_mixin.jira._session.get.assert_called_once_with(
+            "https://test.url/attachment", stream=True, timeout=30
+        )
+
     def test_fetch_attachment_content_http_error(
         self, attachments_mixin: AttachmentsMixin
     ):

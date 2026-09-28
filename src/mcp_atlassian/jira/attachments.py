@@ -71,7 +71,9 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
             logger.error(f"Error downloading attachment: {str(e)}")
             return False
 
-    def fetch_attachment_content(self, url: str) -> bytes | None:
+    def fetch_attachment_content(
+        self, url: str, *, max_bytes: int | None = None
+    ) -> bytes | None:
         """
         Fetch attachment content into memory.
 
@@ -87,12 +89,24 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
 
         try:
             logger.info(f"Fetching attachment from {url}")
-            response = self.jira._session.get(url, stream=True)
-            response.raise_for_status()
-
-            chunks: list[bytes] = []
-            for chunk in response.iter_content(chunk_size=8192):
-                chunks.append(chunk)
+            request_kwargs: dict[str, Any] = {"stream": True}
+            if max_bytes is not None:
+                request_kwargs["timeout"] = 30
+            response = self.jira._session.get(url, **request_kwargs)
+            try:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in response.iter_content(chunk_size=8192):
+                    size += len(chunk)
+                    if max_bytes is not None and size > max_bytes:
+                        logger.warning(
+                            "Attachment exceeded inline limit while streaming"
+                        )
+                        return None
+                    chunks.append(chunk)
+            finally:
+                response.close()
 
             data = b"".join(chunks)
             logger.info(

@@ -16,6 +16,7 @@ from src.mcp_atlassian.jira import JiraFetcher
 from src.mcp_atlassian.jira.config import JiraConfig
 from src.mcp_atlassian.servers.context import MainAppContext
 from src.mcp_atlassian.servers.main import AtlassianMCP
+from src.mcp_atlassian.utils.media import ATTACHMENT_MAX_BYTES
 from src.mcp_atlassian.utils.oauth import OAuthConfig
 from tests.fixtures.jira_mocks import (
     MOCK_JIRA_COMMENTS_SIMPLIFIED,
@@ -401,6 +402,8 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
         get_board_issues,
         get_field_options,
         get_issue,
+        get_issue_attachment_content,
+        get_issue_attachments,
         get_issue_images,
         get_link_types,
         get_project_components,
@@ -425,6 +428,8 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
 
     jira_sub_mcp = FastMCP(name="TestJiraSubMCP")
     jira_sub_mcp.add_tool(get_issue)
+    jira_sub_mcp.add_tool(get_issue_attachments)
+    jira_sub_mcp.add_tool(get_issue_attachment_content)
     jira_sub_mcp.add_tool(search)
     jira_sub_mcp.add_tool(search_fields)
     jira_sub_mcp.add_tool(get_project_issues)
@@ -593,6 +598,88 @@ async def test_search(jira_client, mock_jira_fetcher):
         expand=None,
         projects_filter=None,
         page_token=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_search_brief_keeps_navigation_and_requests_fewer_fields(
+    jira_client, mock_jira_fetcher
+):
+    """A scan should not return full issue bodies into the agent context."""
+    from mcp_atlassian.utils.response_projection import JIRA_BRIEF_FIELDS
+
+    response = await jira_client.call_tool(
+        "jira_search", {"jql": "project = TEST", "response_mode": "brief"}
+    )
+    content = json.loads(response.content[0].text)
+    assert content["issues"]
+    assert content["issues"][0]["browse_url"].endswith("/browse/PROJ-123")
+    assert "description" not in content["issues"][0]
+    assert mock_jira_fetcher.search_issues.call_args.kwargs["fields"] == (
+        JIRA_BRIEF_FIELDS.split(",")
+    )
+
+
+@pytest.mark.anyio
+async def test_empty_description_survives_full_search_and_get_issue(
+    jira_client, mock_jira_fetcher
+):
+    """An empty ADF body is explicit in full MCP results, absent in brief."""
+    from mcp_atlassian.models.jira import JiraIssue, JiraSearchResult
+
+    api_issue = {
+        "id": "1",
+        "key": "TEST-1",
+        "fields": {"description": {"type": "doc", "version": 1, "content": []}},
+    }
+    mock_jira_fetcher.get_issue.side_effect = None
+    mock_jira_fetcher.get_issue.return_value = JiraIssue.from_api_response(api_issue)
+    mock_jira_fetcher.search_issues.side_effect = None
+    mock_jira_fetcher.search_issues.return_value = JiraSearchResult.from_api_response(
+        {"issues": [api_issue], "total": 1}
+    )
+
+    full_search = await jira_client.call_tool("jira_search", {"jql": "project = TEST"})
+    brief_search = await jira_client.call_tool(
+        "jira_search", {"jql": "project = TEST", "response_mode": "brief"}
+    )
+    detail = await jira_client.call_tool("jira_get_issue", {"issue_key": "TEST-1"})
+
+    assert json.loads(full_search.content[0].text)["issues"][0]["description"] == ""
+    assert "description" not in json.loads(brief_search.content[0].text)["issues"][0]
+    assert json.loads(detail.content[0].text)["description"] == ""
+
+
+@pytest.mark.anyio
+async def test_attachment_manifest_and_selected_fetch(jira_client, mock_jira_fetcher):
+    """Listing files is cheap; downloading one never fetches its siblings."""
+    from types import SimpleNamespace
+
+    attachments = [
+        SimpleNamespace(id="100", filename="design.png", size=4,
+                        content_type="image/png", created="2026-01-01",
+                        url="https://test.atlassian.net/rest/api/3/attachment/content/100"),
+        SimpleNamespace(id="101", filename="notes.txt", size=10,
+                        content_type="text/plain", created="2026-01-02",
+                        url="https://test.atlassian.net/rest/api/3/attachment/content/101"),
+    ]
+    mock_jira_fetcher.get_issue_attachments.return_value = attachments
+    mock_jira_fetcher.fetch_attachment_content.return_value = b"data"
+
+    listing = await jira_client.call_tool(
+        "jira_get_issue_attachments", {"issue_key": "TEST-123"}
+    )
+    manifest = json.loads(listing.content[0].text)
+    assert [item["id"] for item in manifest["attachments"]] == ["100", "101"]
+    mock_jira_fetcher.fetch_attachment_content.assert_not_called()
+
+    selected = await jira_client.call_tool(
+        "jira_get_issue_attachment_content",
+        {"issue_key": "TEST-123", "attachment_id": "100"},
+    )
+    assert selected.content[0].type == "resource"
+    mock_jira_fetcher.fetch_attachment_content.assert_called_once_with(
+        attachments[0].url, max_bytes=ATTACHMENT_MAX_BYTES
     )
 
 

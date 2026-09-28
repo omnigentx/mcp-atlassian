@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
 from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
@@ -12,6 +13,11 @@ from requests.exceptions import HTTPError
 
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.jira.constants import DEFAULT_READ_JIRA_FIELDS
+from mcp_atlassian.utils.response_projection import (
+    JIRA_BRIEF_FIELDS,
+    brief_jira_search,
+    jira_browse_url,
+)
 from mcp_atlassian.jira.forms_common import convert_datetime_to_timestamp
 from mcp_atlassian.models.jira import JiraAttachment
 from mcp_atlassian.models.jira.common import JiraUser
@@ -411,6 +417,7 @@ async def get_issue(
         update_history=update_history,
     )
     result = issue.to_simplified_dict()
+    result["browse_url"] = jira_browse_url(jira.config.url, issue_key)
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
@@ -482,6 +489,17 @@ async def search(
             default=None,
         ),
     ] = None,
+    response_mode: Annotated[
+        str,
+        Field(
+            description=(
+                "'full' returns the requested issue fields; 'brief' returns "
+                "triage fields and browser links, omitting descriptions. "
+                "Use jira_get_issue for the full body of a selected issue."
+            ),
+            pattern="^(full|brief)$",
+        ),
+    ] = "full",
 ) -> str:
     """Search Jira issues using JQL (Jira Query Language).
 
@@ -499,6 +517,10 @@ async def search(
         JSON string representing the search results including pagination info.
     """
     jira = await get_jira_fetcher(ctx)
+    if response_mode not in {"full", "brief"}:
+        raise ValueError("response_mode must be 'full' or 'brief'")
+    if response_mode == "brief" and fields == ",".join(DEFAULT_READ_JIRA_FIELDS):
+        fields = JIRA_BRIEF_FIELDS
     fields_list: str | list[str] | None = fields
     if fields and fields != "*all":
         fields_list = [f.strip() for f in fields.split(",")]
@@ -513,6 +535,8 @@ async def search(
         page_token=page_token,
     )
     result = search_result.to_simplified_dict()
+    if response_mode == "brief":
+        result = brief_jira_search(result, jira.config.url)
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
@@ -934,6 +958,73 @@ async def download_attachments(
     )
 
     return contents
+
+
+@jira_mcp.tool(
+    tags={"jira", "read", "toolset:jira_attachments"},
+    annotations={"title": "List Issue Attachments", "readOnlyHint": True},
+)
+async def get_issue_attachments(ctx: Context, issue_key: str) -> str:
+    """List attachment IDs and metadata without downloading file bytes."""
+    jira = await get_jira_fetcher(ctx)
+    attachments = jira.get_issue_attachments(issue_key)
+    return json.dumps({
+        "issue_key": issue_key,
+        "attachments": [
+            {"id": item.id, "filename": item.filename, "size": item.size,
+             "content_type": item.content_type, "created": item.created}
+            for item in attachments
+        ],
+    }, ensure_ascii=False)
+
+
+@jira_mcp.tool(
+    tags={"jira", "read", "toolset:jira_attachments"},
+    annotations={"title": "Download One Issue Attachment", "readOnlyHint": True},
+)
+async def get_issue_attachment_content(
+    ctx: Context, issue_key: str, attachment_id: str,
+) -> TextContent | EmbeddedResource:
+    """Download one selected attachment by ID after listing its metadata."""
+    jira = await get_jira_fetcher(ctx)
+    attachment = next(
+        (item for item in jira.get_issue_attachments(issue_key)
+         if item.id == attachment_id), None,
+    )
+    if attachment is None:
+        return TextContent(type="text", text=json.dumps({
+            "error": "Attachment not found on issue", "issue_key": issue_key,
+            "attachment_id": attachment_id,
+        }))
+    if attachment.size > ATTACHMENT_MAX_BYTES:
+        return TextContent(type="text", text=json.dumps({
+            "error": "Attachment exceeds inline size limit", "size": attachment.size,
+        }))
+    site = urlparse(jira.config.url)
+    target = urlparse(attachment.url or "")
+    if target.scheme != "https" or target.hostname != site.hostname:
+        return TextContent(type="text", text=json.dumps({
+            "error": "Attachment URL is outside the configured Jira site"
+        }))
+    data = jira.fetch_attachment_content(
+        attachment.url, max_bytes=ATTACHMENT_MAX_BYTES
+    )
+    if data is None:
+        return TextContent(type="text", text=json.dumps({
+            "error": "Attachment fetch failed", "attachment_id": attachment_id,
+        }))
+    if len(data) > ATTACHMENT_MAX_BYTES:
+        return TextContent(type="text", text=json.dumps({
+            "error": "Attachment exceeds inline size limit", "size": len(data),
+        }))
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=f"attachment:///{issue_key}/{attachment_id}",
+            mimeType=attachment.content_type or "application/octet-stream",
+            blob=base64.b64encode(data).decode("ascii"),
+        ),
+    )
 
 
 @jira_mcp.tool(
